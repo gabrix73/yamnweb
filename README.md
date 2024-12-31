@@ -2,7 +2,7 @@
 <p>This repository contains the Yamn Web Interface, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the Yamn remailer software. 
 The interface is built using HTML5, CSS3, and PHP, and it ensures secure and anonymous email transmission.</p>
 
-<p>Make this repository as the apache document's root /var/www/yamnweb.
+<p>Make this repository as the apache document's root /var/www/yamnweb.<br>
 Create a subdirectory pool/ in /var/www/yamnweb.</p>
 <p>git clone https://github.com/crooks/yamn /opt/yamn-master </p>
 <p>Build and ensure the GO Yamn executable path is located at /opt/yamn-master/yamn.<br>

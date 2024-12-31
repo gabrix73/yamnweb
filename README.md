@@ -1,4 +1,4 @@
-<b>Note<b><br>
+<b>Note</b><br>
 <p>This code is here for making it better</p><br>
 
 <b>Yamn Web Interface</b><br>

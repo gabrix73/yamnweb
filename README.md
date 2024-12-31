@@ -2,9 +2,10 @@
 <p>This code is here for making it better</p><br>
 
 <b>Yamn Web Interface</b><br>
-<p>This repository contains the Yamn Web Interface, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the Yamn remailer software.<br> 
-The interface is built using HTML5, CSS3, and PHP, and it ensures secure and anonymous email transmission.</p>
+<p>This repository contains a web interface for <em>crooks/yamn</em>, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the yamn network.<br> 
+The interface is built using HTML5, CSS3, and PHP.</p>
 
+<b>Instructions<b><br>
 <p>Make this repository as the apache document's root /var/www/yamnweb.<br>
 Create a subdirectory pool/ in /var/www/yamnweb.</p>
 <p>git clone https://github.com/crooks/yamn /opt/yamn-master </p>

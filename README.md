@@ -1,3 +1,6 @@
+<b>Note<b><br>
+<p>This code is here for making it better</p><br>
+
 <b>Yamn Web Interface</b><br>
 <p>This repository contains the Yamn Web Interface, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the Yamn remailer software.<br> 
 The interface is built using HTML5, CSS3, and PHP, and it ensures secure and anonymous email transmission.</p>

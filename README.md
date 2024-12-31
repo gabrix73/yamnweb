@@ -1,5 +1,5 @@
 <b>Yamn Web Interface</b><br>
-<p>This repository contains the Yamn Web Interface, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the Yamn remailer software. 
+<p>This repository contains the Yamn Web Interface, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the Yamn remailer software.<br> 
 The interface is built using HTML5, CSS3, and PHP, and it ensures secure and anonymous email transmission.</p>
 
 <p>Make this repository as the apache document's root /var/www/yamnweb.<br>

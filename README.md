@@ -5,7 +5,7 @@ The interface is built using HTML5, CSS3, and PHP, and it ensures secure and ano
 <p>Make this repository as the apache document's root /var/www/yamnweb.
 Create a subdirectory pool/ in /var/www/yamnweb.</p>
 <p>git clone https://github.com/crooks/yamn /opt/yamn-master </p>
-<p>Build and ensure the GO Yamn executable path is located at /opt/yamn-master/yamn.
+<p>Build and ensure the GO Yamn executable path is located at /opt/yamn-master/yamn.<br>
 Update the configuration file /opt/yamn-master/yamn.yml with the appropriate settings for your environment.</p>
 
 <b>it is recommended</b><br> 

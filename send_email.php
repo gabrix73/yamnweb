@@ -69,7 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
     if ($return_var_send == 0) {
         echo "Email sent successfully!<br>";
-        echo "<a href='https://yamnweb.virebent.art'>Return to Home</a>";
+        echo "<a href='https://home'>Return to Home</a>";
     } else {
         echo "Error sending email.";
     }

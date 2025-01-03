@@ -1,6 +1,3 @@
-<b>Note</b><br>
-<p>This code is here for making it better</p><br>
-
 <b>Yamn Web Interface</b><br>
 <p>This repository contains a web interface for <em>crooks/yamn</em>, a user-friendly web application designed to facilitate the sending of anonymous emails through a chain of remailers using the yamn network.<br> 
 The interface is built using HTML5, CSS3, and PHP.</p>

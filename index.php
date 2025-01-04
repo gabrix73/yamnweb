@@ -71,6 +71,9 @@ $exitRemailers = array_intersect($exitRemailers, $allowedEntryExitRemailers);
         <label for="from">From:</label>
         <input type="text" name="from" id="from" placeholder="Please use this format: Jane Doe &lt;jane@nowhere.com&gt;">
         <br>
+        <label for="reply_to">Reply-To:</label>
+        <input type="text" name="reply_to" id="reply_to" placeholder="Please use this format: Jane Doe &lt;jane@nowhere.com&gt;">
+        <br>
         <label for="to">To:</label>
         <input type="text" name="to" id="to">
         <br>
@@ -94,7 +97,13 @@ $exitRemailers = array_intersect($exitRemailers, $allowedEntryExitRemailers);
     <div class="instructions-frame">
         <h2>About the Interface</h2>
         <p>This web interface is built using the following technologies: HTML5 CSS3 PHP</p>
-        <p>Contact for abuses: <a href="">abuse (at) domain</a></p>
+        <div class="github-link">
+            <a href="https://github.com/gabrix73/yamn-web/" target="_blank">
+                <img src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png" alt="GitHub" width="24" height="24">
+                View on GitHub
+            </a>
+        </div>
+        <p>Contact for abuses: <a href="&#109;&#97;&#105;&#108;&#116;&#111;&#58;%61%62%75%73%65%40%76%69%72%65%62%65%6E%74%2E%61%72%74">abuse (at) virebent dot art</a></p>
     </div>
     <footer>
         <p>&copy; 2024 VICTOR - Hostile Communication Center & &#169; FUCK Design All Rights Reserved.</p>

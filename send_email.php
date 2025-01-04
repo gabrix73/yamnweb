@@ -4,6 +4,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $middleRemailer = $_POST['middle_remailer'];
     $exitRemailer = $_POST['exit_remailer'];
     $from = $_POST['from'];
+    $replyTo = $_POST['reply_to'];
     $to = $_POST['to'];
     $subject = $_POST['subject'];
     $newsgroups = $_POST['newsgroups'];
@@ -27,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     if (!empty($references)) {
         $headers .= "References: $references\n";
     }
-    $messageContent = $headers . "From: $from\nTo: $to\nSubject: $subject\n";
+    $messageContent = $headers . "From: $from\nReply-To: $replyTo\nTo: $to\nSubject: $subject\n";
     if (!empty($newsgroups)) {
         $messageContent .= "Newsgroups: $newsgroups\n";
     }
@@ -46,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     if ($return_var_send != 0) {
         $logEntry = "Date: " . date('Y-m-d H:i:s') . "\n";
         $logEntry .= "From: $from\n";
+        $logEntry .= "Reply-To: $replyTo\n";
         $logEntry .= "To: $to\n";
         $logEntry .= "Subject: $subject\n";
         if (!empty($newsgroups)) {
@@ -69,7 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
     if ($return_var_send == 0) {
         echo "Email sent successfully!<br>";
-        echo "<a href='https://home'>Return to Home</a>";
+        echo "<a href='https://yamnweb.virebent.art'>Return to Home</a>";
     } else {
         echo "Error sending email.";
     }

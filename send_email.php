@@ -20,9 +20,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     }
 
     $chain = "$entryRemailer,$middleRemailer,$exitRemailer";
-    $headers = "X-User-Agent: Victor's Yamn Web Interface\n";
-    $headers .= "X-Mailer: Victor Hostile Communications Center\n";
-    $headers .= "Content-Type: text/plain; charset=utf-8\n";
+    $headers = "Content-Type: text/plain; charset=utf-8\n";
     $headers .= "Content-Transfer-Encoding: 8bit\n";
     $headers .= "MIME-Version: 1.0\n";
     if (!empty($references)) {

@@ -5,6 +5,7 @@ The interface is built using HTML5, CSS3, and PHP.</p>
 <b>Instructions</b><br>
 <p>Make this repository as your http daemon document's root <pre>/var/www/yamnweb</pre> <em></em>(renaming yamn-web, yamnweb)</em> ;).<br>
 Create a subdirectory pool/ in /var/www/yamnweb.</p>
+<b>Clone down crooks yamn client</b><br>
 <pre>git clone https://github.com/crooks/yamn /opt/yamn-master </pre>
 <p>Build and ensure the GO Yamn executable path is located at /opt/yamn-master/yamn.<br>
 Update the configuration file /opt/yamn-master/yamn.yml with the appropriate settings for your environment.</p>

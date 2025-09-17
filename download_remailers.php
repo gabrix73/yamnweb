@@ -1,6 +1,6 @@
 <?php
 function downloadRemailers() {
-    $url = 'https://www.haph.org/yamn/mlist2.txt';
+    $url = 'https://echolot.virebent.art/mlist2.txt';
     $file = '/var/www/yamnweb/remailers.txt';
     if (!file_exists($file) || (time() - filemtime($file) > 86400)) { // Scarica solo se il file non esiste o è più vecchio di 24 ore
         file_put_contents($file, file_get_contents($url));

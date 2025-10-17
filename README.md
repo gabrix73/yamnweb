@@ -1,4 +1,4 @@
-# 🔐 Guida Completa Installazione YAMN Web Interface Sicura
+# 🔐 Guida Completa Installazione YAMN Web Interface
 
 ## 📋 Indice
 1. [Prerequisiti](#prerequisiti)

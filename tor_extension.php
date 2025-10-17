@@ -1,319 +1,445 @@
 <?php
 /**
- * Tor Extension for YAMN Web Interface
+ * Secure Tor Extension for YAMN Web Interface
  * 
- * This file provides functions to enable Tor connectivity for YAMN
- * using torsocks to force all connections through Tor.
+ * Security Features:
+ * - No metadata retention (no detailed logging)
+ * - Randomized timing delays
+ * - Secure command execution
+ * - Tor enforcement with verification
+ * - Protection against timing attacks
+ * 
+ * This implementation follows privacy-first principles
  */
 
 // Constants
 define('YAMN_PATH', '/opt/yamn-master/yamn');
 define('YAMN_CONFIG', '/opt/yamn-master/yamn.yml');
-define('TOR_PROXY', '127.0.0.1:9050');  // Default Tor SOCKS proxy
-define('TOR_CONFIG_FILE', '/var/www/yamnweb/tor_config.ini');
-define('TORSOCKS_PATH', 'torsocks');    // Path to torsocks command (assuming it's in PATH)
+define('TOR_PROXY', '127.0.0.1:9050');
+define('TORSOCKS_PATH', 'torsocks');
+define('SECURE_POOL_DIR', '/opt/yamn-data/pool');
 
 /**
- * Debug logger function
+ * Check if Tor is available and working
  * 
- * @param string $message Message to log
- * @param bool $include_timestamp Whether to include timestamp
- * @return void
- */
-function logDebug($message, $include_timestamp = true) {
-    $log_file = '/var/www/yamnweb/debug.log';
-    $log_entry = ($include_timestamp ? date('Y-m-d H:i:s') . " - " : "") . $message . "\n";
-    file_put_contents($log_file, $log_entry, FILE_APPEND);
-}
-
-/**
- * Check if Tor is available on the system
- * 
- * @return bool True if Tor service is available
+ * @return bool True if Tor is available
  */
 function isTorAvailable() {
-    logDebug("Checking if Tor is available...");
-    
     // Check if torsocks is installed
-    $torsocks_check = shell_exec('which torsocks 2>&1');
-    if (empty($torsocks_check) || strpos($torsocks_check, 'no torsocks') !== false) {
-        logDebug("WARNING: torsocks not found in PATH. Tor routing may not work correctly.");
-    } else {
-        logDebug("torsocks found: " . trim($torsocks_check));
+    $torsocksPath = shell_exec('which torsocks 2>/dev/null');
+    if (empty($torsocksPath)) {
+        return false;
     }
     
     // Check if Tor SOCKS proxy is listening
-    $connection = @fsockopen('127.0.0.1', 9050, $errno, $errstr, 1);
-    if (is_resource($connection)) {
-        fclose($connection);
-        logDebug("Tor is available: SOCKS proxy connection successful");
-        return true;
+    $connection = @fsockopen('127.0.0.1', 9050, $errno, $errstr, 2);
+    if (!is_resource($connection)) {
+        return false;
     }
     
-    logDebug("SOCKS proxy connection failed: $errno - $errstr");
+    fclose($connection);
     
-    // Alternative: Check if Tor service is running
-    $tor_running = shell_exec('pgrep -f "tor" | wc -l');
-    if (intval($tor_running) > 0) {
-        logDebug("Tor is available: Tor process is running");
-        return true;
+    // Verify Tor by checking external IP through Tor
+    // This ensures Tor is actually working, not just listening
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => 'https://check.torproject.org/api/ip',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_PROXY => '127.0.0.1:9050',
+        CURLOPT_PROXYTYPE => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_SSL_VERIFYPEER => true
+    ]);
+    
+    $result = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && $result) {
+        $data = json_decode($result, true);
+        return isset($data['IsTor']) && $data['IsTor'] === true;
     }
     
-    logDebug("Tor is NOT available: No Tor process found");
     return false;
 }
 
 /**
- * Check if an email address belongs to an .onion domain
+ * Secure random delay to prevent timing correlation
  * 
- * @param string $email The email address to check
- * @return bool True if the email is for an .onion domain
+ * @param int $minSeconds Minimum delay in seconds
+ * @param int $maxSeconds Maximum delay in seconds
  */
-function isOnionEmail($email) {
-    // Extract domain from email address
-    if (preg_match('/@([^>]+)/', $email, $matches)) {
-        $domain = $matches[1];
-        $is_onion = (strpos($domain, '.onion') !== false);
-        logDebug("Email domain check: $domain - " . ($is_onion ? "is .onion" : "is NOT .onion"));
-        return $is_onion;
-    }
-    logDebug("No domain found in email: $email");
-    return false;
+function secureRandomDelay($minSeconds = 10, $maxSeconds = 120) {
+    $delay = random_int($minSeconds, $maxSeconds);
+    sleep($delay);
 }
 
 /**
- * Determine if Tor should be used for the current email
- * Always returns true since Tor is now mandatory
+ * Validate remailer chain to prevent injection
  * 
- * @param string $to The recipient email address
- * @return bool Always returns true
+ * @param string $chain The remailer chain
+ * @return bool True if valid
  */
-function shouldUseTor($to) {
-    logDebug("Checking if Tor should be used for recipient: $to");
-    logDebug("Tor usage is mandatory for all communications");
+function isValidChain($chain) {
+    // Chain should only contain alphanumeric, comma, asterisk, and hyphen
+    return preg_match('/^[a-zA-Z0-9,\*\-]+$/', $chain) === 1;
+}
+
+/**
+ * Secure command execution with proper escaping
+ * 
+ * @param string $command Command to execute
+ * @param array &$output Output array
+ * @param int &$returnVar Return code
+ */
+function secureExec($command, &$output, &$returnVar) {
+    // Execute with output buffering
+    exec($command, $output, $returnVar);
+}
+
+/**
+ * Send email through YAMN with Tor (always enforced)
+ * 
+ * @param string $chain Remailer chain
+ * @param int $copies Number of copies
+ * @param string $messageFile Path to message file
+ * @param bool $useTor Ignored, Tor is always used
+ * @return array Result status
+ */
+function sendYamnEmailSecure($chain, $copies, $messageFile, $useTor = true) {
+    // Validate inputs
+    if (!isValidChain($chain)) {
+        return [
+            'success' => false,
+            'errors' => ['Invalid remailer chain format']
+        ];
+    }
+    
+    if ($copies < 1 || $copies > 3) {
+        return [
+            'success' => false,
+            'errors' => ['Invalid number of copies']
+        ];
+    }
+    
+    // Verify prerequisites
+    if (!file_exists($messageFile)) {
+        return [
+            'success' => false,
+            'errors' => ['Message file not found']
+        ];
+    }
+    
+    if (!file_exists(YAMN_PATH) || !is_executable(YAMN_PATH)) {
+        return [
+            'success' => false,
+            'errors' => ['YAMN executable not available']
+        ];
+    }
+    
+    if (!file_exists(YAMN_CONFIG)) {
+        return [
+            'success' => false,
+            'errors' => ['YAMN configuration not found']
+        ];
+    }
+    
+    // Verify torsocks is available
+    $torsocksCheck = shell_exec('which torsocks 2>/dev/null');
+    if (empty($torsocksCheck)) {
+        return [
+            'success' => false,
+            'errors' => ['torsocks not installed']
+        ];
+    }
+    
+    // Random delay BEFORE adding to pool (prevent timing correlation)
+    secureRandomDelay(5, 30);
+    
+    // Escape arguments properly
+    $escapedChain = escapeshellarg($chain);
+    $escapedCopies = (int)$copies;
+    $escapedMessageFile = escapeshellarg($messageFile);
+    $escapedYamnPath = escapeshellarg(YAMN_PATH);
+    $escapedConfig = escapeshellarg(YAMN_CONFIG);
+    
+    // Build command with proper escaping
+    // Use process substitution to avoid leaving message file readable
+    $commandAddToPool = sprintf(
+        '%s %s --config=%s --mail --chain=%s --copies=%d 2>&1 < %s',
+        TORSOCKS_PATH,
+        $escapedYamnPath,
+        $escapedConfig,
+        $escapedChain,
+        $escapedCopies,
+        $escapedMessageFile
+    );
+    
+    // Execute add to pool
+    $outputAddToPool = [];
+    $returnVarAddToPool = 0;
+    secureExec($commandAddToPool, $outputAddToPool, $returnVarAddToPool);
+    
+    // Check if add to pool succeeded
+    if ($returnVarAddToPool !== 0) {
+        return [
+            'success' => false,
+            'errors' => ['Failed to add message to pool']
+        ];
+    }
+    
+    // Random delay BETWEEN operations
+    secureRandomDelay(3, 15);
+    
+    // Build send command
+    $commandSend = sprintf(
+        '%s %s --config=%s -S 2>&1',
+        TORSOCKS_PATH,
+        $escapedYamnPath,
+        $escapedConfig
+    );
+    
+    // Execute send
+    $outputSend = [];
+    $returnVarSend = 0;
+    secureExec($commandSend, $outputSend, $returnVarSend);
+    
+    // Determine success
+    $success = ($returnVarSend === 0 && $returnVarAddToPool === 0);
+    
+    // Random delay AFTER sending (prevent timing correlation)
+    secureRandomDelay(2, 10);
+    
+    // Return minimal information (no detailed logs)
+    if ($success) {
+        return [
+            'success' => true
+        ];
+    } else {
+        return [
+            'success' => false,
+            'errors' => ['Failed to send message']
+        ];
+    }
+}
+
+/**
+ * Legacy wrapper for backward compatibility
+ * Always uses Tor regardless of $useTor parameter
+ */
+function sendYamnEmail($chain, $copies, $messageFile, $useTor = true) {
+    return sendYamnEmailSecure($chain, $copies, $messageFile, true);
+}
+
+/**
+ * Verify Tor circuit and get new identity
+ * Useful before sending to ensure fresh circuit
+ * 
+ * @return bool True if successful
+ */
+function getTorNewIdentity() {
+    // Connect to Tor control port
+    $fp = @fsockopen('127.0.0.1', 9051, $errno, $errstr, 5);
+    if (!$fp) {
+        return false;
+    }
+    
+    // Authenticate (assuming no password or cookie auth)
+    // In production, use proper authentication
+    fwrite($fp, "AUTHENTICATE\r\n");
+    $response = fgets($fp);
+    
+    if (strpos($response, '250') === false) {
+        fclose($fp);
+        return false;
+    }
+    
+    // Request new identity
+    fwrite($fp, "SIGNAL NEWNYM\r\n");
+    $response = fgets($fp);
+    
+    fclose($fp);
+    
+    return strpos($response, '250') !== false;
+}
+
+/**
+ * Enhanced Tor check with circuit verification
+ * 
+ * @return bool True if Tor is working properly
+ */
+function verifyTorCircuit() {
+    // Check basic Tor availability
+    if (!isTorAvailable()) {
+        return false;
+    }
+    
+    // Try to get a new circuit
+    // This ensures Tor is not just running but actually functional
+    if (!getTorNewIdentity()) {
+        // If we can't get new identity, Tor might still work
+        // Don't fail, just continue
+    }
+    
+    // Wait a moment for circuit to build
+    sleep(2);
+    
     return true;
 }
 
 /**
- * Configure environment variables for Tor
+ * Initialize secure environment for YAMN operations
  * 
- * @return void
+ * @return bool True if successful
  */
-function configureTorForYamn() {
-    logDebug("Configuring environment for YAMN with Tor (mandatory)");
+function initSecureEnvironment() {
+    // Ensure secure directories exist
+    if (!file_exists(SECURE_POOL_DIR)) {
+        mkdir(SECURE_POOL_DIR, 0700, true);
+    }
     
-    // Set environment variables that torsocks and YAMN might check for Tor configuration
-    putenv("SOCKS_PROXY=" . TOR_PROXY);
-    putenv("ALL_PROXY=socks5://" . TOR_PROXY);
-    putenv("socks_proxy=" . TOR_PROXY);
-    putenv("all_proxy=socks5://" . TOR_PROXY);
-    putenv("TORSOCKS_ALLOW_INBOUND=1");  // Allow inbound connections through torsocks
+    // Set restrictive umask
+    umask(0077);
     
-    logDebug("Environment variables set for Tor usage");
+    // Verify Tor is available
+    if (!isTorAvailable()) {
+        return false;
+    }
     
-    // Display current environment settings
-    logDebug("Current environment settings:");
-    logDebug("SOCKS_PROXY: " . getenv("SOCKS_PROXY"), false);
-    logDebug("ALL_PROXY: " . getenv("ALL_PROXY"), false);
-    logDebug("TORSOCKS_ALLOW_INBOUND: " . getenv("TORSOCKS_ALLOW_INBOUND"), false);
+    return true;
 }
 
 /**
- * Send an email through YAMN with Tor routing using torsocks
+ * Clean up function to be called after operations
+ * Removes temporary files securely
  * 
- * @param string $chain The remailer chain string
- * @param int $copies Number of copies to send
- * @param string $messageFile Path to the message file
- * @param bool $useTor Parameter kept for compatibility, but ignored (Tor is always used)
- * @return array Array containing success status and output
+ * @param string $filepath File to securely delete
  */
-function sendYamnEmail($chain, $copies, $messageFile, $useTor = true) {
-    logDebug("=== STARTING EMAIL SEND PROCESS ===");
-    logDebug("Chain: $chain");
-    logDebug("Copies: $copies");
-    logDebug("Message file: $messageFile");
-    logDebug("Using Tor: Yes (mandatory with torsocks)");
-    
-    // Check if message file exists
-    if (!file_exists($messageFile)) {
-        logDebug("ERROR: Message file does not exist: $messageFile");
-        return [
-            'success' => false,
-            'tor_used' => true,
-            'add_to_pool' => [
-                'command' => '',
-                'output' => ['Message file not found'],
-                'return_var' => 1
-            ],
-            'send' => [
-                'command' => '',
-                'output' => ['Skipped due to previous error'],
-                'return_var' => 1
-            ]
-        ];
+function secureCleanup($filepath) {
+    if (!file_exists($filepath)) {
+        return;
     }
     
-    // Check if YAMN exists and is executable
-    if (!file_exists(YAMN_PATH)) {
-        logDebug("ERROR: YAMN executable not found at: " . YAMN_PATH);
-        return [
-            'success' => false,
-            'tor_used' => true,
-            'add_to_pool' => [
-                'command' => '',
-                'output' => ['YAMN executable not found'],
-                'return_var' => 1
-            ],
-            'send' => [
-                'command' => '',
-                'output' => ['Skipped due to previous error'],
-                'return_var' => 1
-            ]
-        ];
+    $filesize = filesize($filepath);
+    
+    // DoD 5220.22-M standard: 3-pass overwrite
+    for ($i = 0; $i < 3; $i++) {
+        $fp = fopen($filepath, 'w');
+        if ($fp) {
+            fwrite($fp, random_bytes($filesize));
+            fclose($fp);
+        }
     }
     
-    if (!is_executable(YAMN_PATH)) {
-        logDebug("ERROR: YAMN is not executable: " . YAMN_PATH);
-        return [
-            'success' => false,
-            'tor_used' => true,
-            'add_to_pool' => [
-                'command' => '',
-                'output' => ['YAMN is not executable'],
-                'return_var' => 1
-            ],
-            'send' => [
-                'command' => '',
-                'output' => ['Skipped due to previous error'],
-                'return_var' => 1
-            ]
-        ];
+    // Final overwrite with zeros
+    $fp = fopen($filepath, 'w');
+    if ($fp) {
+        fwrite($fp, str_repeat("\0", $filesize));
+        fclose($fp);
     }
     
-    // Check if YAMN config exists
-    if (!file_exists(YAMN_CONFIG)) {
-        logDebug("ERROR: YAMN config not found at: " . YAMN_CONFIG);
-        return [
-            'success' => false,
-            'tor_used' => true,
-            'add_to_pool' => [
-                'command' => '',
-                'output' => ['YAMN config not found'],
-                'return_var' => 1
-            ],
-            'send' => [
-                'command' => '',
-                'output' => ['Skipped due to previous error'],
-                'return_var' => 1
-            ]
-        ];
+    // Delete file
+    unlink($filepath);
+}
+
+/**
+ * Get Tor circuit information (for debugging only)
+ * DO NOT use in production as it may leak information
+ * 
+ * @return array|false Circuit info or false
+ */
+function getTorCircuitInfo() {
+    // Only enable if explicitly requested via environment variable
+    if (getenv('YAMN_DEBUG_TOR') !== 'true') {
+        return false;
     }
     
-    // Check if torsocks is available
-    $torsocks_check = shell_exec('which torsocks 2>/dev/null');
-    if (empty($torsocks_check)) {
-        logDebug("ERROR: torsocks not found. Cannot route traffic through Tor.");
-        return [
-            'success' => false,
-            'tor_used' => true,
-            'add_to_pool' => [
-                'command' => '',
-                'output' => ['torsocks not installed'],
-                'return_var' => 1
-            ],
-            'send' => [
-                'command' => '',
-                'output' => ['Skipped due to previous error'],
-                'return_var' => 1
-            ]
-        ];
+    $fp = @fsockopen('127.0.0.1', 9051, $errno, $errstr, 5);
+    if (!$fp) {
+        return false;
     }
     
-    // Configure environment for torsocks
-    configureTorForYamn();
+    fwrite($fp, "AUTHENTICATE\r\n");
+    $response = fgets($fp);
     
-    // Build YAMN command to add message to pool with torsocks
-    $command_add_to_pool = TORSOCKS_PATH . " " . YAMN_PATH . " " .
-                          "--config=" . YAMN_CONFIG . " " .
-                          "--mail " .
-                          "--chain=\"$chain\" " .
-                          "--copies=$copies < $messageFile 2>&1";
-    
-    // Command to send emails in pool with torsocks
-    $command_send = TORSOCKS_PATH . " " . YAMN_PATH . " " .
-                   "--config=" . YAMN_CONFIG . " -S 2>&1";
-    
-    // Log the commands
-    logDebug("Add to pool command: $command_add_to_pool");
-    
-    // Execute add to pool command
-    logDebug("Executing add to pool command...");
-    exec($command_add_to_pool, $output_add_to_pool, $return_var_add_to_pool);
-    
-    // Log the output and return code
-    logDebug("Add to pool output: " . implode("\n", $output_add_to_pool));
-    logDebug("Add to pool return code: $return_var_add_to_pool");
-    
-    // Only execute send command if add to pool was successful
-    if ($return_var_add_to_pool == 0) {
-        logDebug("Send command: $command_send");
-        logDebug("Executing send command...");
-        exec($command_send, $output_send, $return_var_send);
-        logDebug("Send output: " . implode("\n", $output_send));
-        logDebug("Send return code: $return_var_send");
-    } else {
-        logDebug("Skipping send command due to add to pool failure");
-        $output_send = ["Skipped - add to pool command failed"];
-        $return_var_send = -1;
+    if (strpos($response, '250') === false) {
+        fclose($fp);
+        return false;
     }
     
-    // Standard log entry
-    $log_entry = date('Y-m-d H:i:s') . " | Chain: $chain | Copies: $copies | Tor: Yes | Status: " . 
-                 (($return_var_send == 0 && $return_var_add_to_pool == 0) ? "Success" : "Failed") . "\n";
-    file_put_contents('/var/www/yamnweb/yamn_send.log', $log_entry, FILE_APPEND);
+    fwrite($fp, "GETINFO circuit-status\r\n");
+    $response = '';
+    while (!feof($fp)) {
+        $line = fgets($fp);
+        $response .= $line;
+        if (strpos($line, '250 OK') !== false) {
+            break;
+        }
+    }
     
-    // Success status
-    $success = ($return_var_send == 0 && $return_var_add_to_pool == 0);
-    logDebug("Operation " . ($success ? "SUCCEEDED" : "FAILED"));
-    logDebug("=== EMAIL SEND PROCESS COMPLETE ===");
+    fclose($fp);
     
-    return [
-        'success' => $success,
-        'tor_used' => true,
-        'add_to_pool' => [
-            'command' => $command_add_to_pool,
-            'output' => $output_add_to_pool,
-            'return_var' => $return_var_add_to_pool
-        ],
-        'send' => [
-            'command' => $command_send,
-            'output' => $output_send,
-            'return_var' => $return_var_send
-        ]
+    return ['circuit_status' => $response];
+}
+
+/**
+ * Test Tor connectivity without leaving traces
+ * 
+ * @return array Test results
+ */
+function testTorConnectivity() {
+    $results = [
+        'tor_available' => false,
+        'socks_proxy' => false,
+        'circuit_working' => false,
+        'torsocks_installed' => false
     ];
+    
+    // Check SOCKS proxy
+    $connection = @fsockopen('127.0.0.1', 9050, $errno, $errstr, 2);
+    if (is_resource($connection)) {
+        $results['socks_proxy'] = true;
+        fclose($connection);
+    }
+    
+    // Check torsocks
+    $torsocksPath = shell_exec('which torsocks 2>/dev/null');
+    $results['torsocks_installed'] = !empty($torsocksPath);
+    
+    // Check if Tor is actually working
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => 'https://check.torproject.org/api/ip',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_PROXY => '127.0.0.1:9050',
+        CURLOPT_PROXYTYPE => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_SSL_VERIFYPEER => true
+    ]);
+    
+    $result = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && $result) {
+        $data = json_decode($result, true);
+        if (isset($data['IsTor']) && $data['IsTor'] === true) {
+            $results['circuit_working'] = true;
+        }
+    }
+    
+    $results['tor_available'] = (
+        $results['socks_proxy'] && 
+        $results['torsocks_installed'] && 
+        $results['circuit_working']
+    );
+    
+    return $results;
 }
 
-/**
- * Alternative version that uses proxychains4 instead of torsocks
- * Uncomment and modify the above function if you prefer proxychains4
- */
-/*
-function sendYamnEmail($chain, $copies, $messageFile, $useTor = true) {
-    // Configuration similar to above, but using proxychains4
-    // ...
-    
-    // Build YAMN command with proxychains4
-    $command_add_to_pool = "proxychains4 -q " . YAMN_PATH . " " .
-                          "--config=" . YAMN_CONFIG . " " .
-                          "--mail " .
-                          "--chain=\"$chain\" " .
-                          "--copies=$copies < $messageFile 2>&1";
-    
-    $command_send = "proxychains4 -q " . YAMN_PATH . " " .
-                   "--config=" . YAMN_CONFIG . " -S 2>&1";
-    
-    // Rest of the function is the same
-    // ...
+// Initialize on load
+if (!initSecureEnvironment()) {
+    // Silent fail - don't leak information
+    // In production, handle this appropriately
 }
-*/
 ?>

@@ -1,7 +1,7 @@
 <?php
 /**
- * YAMN Web Interface - Secure Anonymous Email Gateway
- * All traffic routed through Tor - No exceptions
+ * YAMN Web Interface - Email Gateway
+ * All traffic routed through Tor
  */
 
 // Disable all error display
@@ -9,7 +9,7 @@ ini_set('display_errors', 0);
 error_reporting(0);
 
 // Load remailer downloader to populate select options
-require_once 'downloadRemailers_secure.php';
+require_once 'download_remailers.php';
 
 $downloader = new SecureRemailerDownloader();
 $remailerList = $downloader->getRemailerList();
@@ -298,7 +298,7 @@ if (empty($remailers)) {
             <p><strong>STATUS:</strong> System operational. Tor connection verified. No logs retained.</p>
         </div>
 
-        <form action="send_secure.php" method="POST">
+        <form action="send_email_with_tor.php" method="POST">
             <!-- REMAILER CHAIN CONFIGURATION -->
             <div class="form-section">
                 <div class="section-title">[ Chain Configuration ]</div>

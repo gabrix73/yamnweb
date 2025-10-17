@@ -1,4 +1,3 @@
-
 <?php
 /**
  * Secure Remailer List Downloader
@@ -581,3 +580,4 @@ try {
     error_log("Remailer download failed: " . $e->getMessage());
 }
 ?>
+

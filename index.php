@@ -1,40 +1,471 @@
 <?php
-/**
- * YAMN Web Interface - Email Gateway
- * All traffic routed through Tor
- */
+// yamnweb - YAMN Mixmaster Network Web Interface
+// Secure anonymous email interface with Tor integration
 
-// Disable all error display
-ini_set('display_errors', 0);
-error_reporting(0);
+// Enable error logging (disable display for security)
+error_reporting(E_ALL);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+// ini_set('error_log', '/var/log/php/yamnweb_errors.log'); // Uncomment if specific log needed
 
-// Load remailer downloader to populate select options
-require_once 'download_remailers.php';
-
-$downloader = new SecureRemailerDownloader();
-$remailerList = $downloader->getRemailerList();
-
-// Parse remailer list to extract remailer names
-$remailers = [];
-if ($remailerList) {
-    $lines = explode("\n", $remailerList);
-    foreach ($lines as $line) {
-        // Extract remailer names (format: "name ******** time uptime")
-        if (preg_match('/^([a-zA-Z0-9\-]+)\s+/', $line, $matches)) {
-            $name = trim($matches[1]);
-            if (!empty($name) && $name !== 'mixmaster' && strlen($name) > 2) {
-                $remailers[] = $name;
-            }
-        }
-    }
-    // Remove duplicates and sort
-    $remailers = array_unique($remailers);
-    sort($remailers);
+// PHP 8.1+ compatibility: FILTER_SANITIZE_STRING is deprecated
+if (!defined('FILTER_SANITIZE_STRING')) {
+    define('FILTER_SANITIZE_STRING', 513);
 }
 
-// If no remailers found, add wildcards
-if (empty($remailers)) {
-    $remailers = ['*'];
+// Configure session BEFORE starting it (critical for cookie-based sessions)
+ini_set('session.cookie_httponly', '1');
+ini_set('session.use_only_cookies', '1');
+ini_set('session.cookie_secure', '0');  // Set to '1' if using HTTPS
+ini_set('session.cookie_samesite', 'Lax'); // Changed from 'Strict' to allow form submissions
+ini_set('session.gc_maxlifetime', 7200); // 2 hours session lifetime
+
+session_start();
+
+// Ensure session is actually working
+if (!isset($_SESSION)) {
+    die("Error: Session could not be initialized. Check PHP session configuration.");
+}
+
+// Test if session is writable
+if (!isset($_SESSION['session_test'])) {
+    $_SESSION['session_test'] = 'working';
+}
+
+// Verify session persists
+if ($_SESSION['session_test'] !== 'working') {
+    die("Error: Session is not persisting. Check session.save_path permissions.");
+}
+
+// Load optional dependencies (don't fail if missing)
+if (file_exists('download_remailers.php')) {
+    require_once 'download_remailers.php';
+} else {
+    error_log("Warning: download_remailers.php not found");
+}
+
+if (file_exists('tor_extension.php')) {
+    require_once 'tor_extension.php';
+} else {
+    error_log("Warning: tor_extension.php not found - Tor integration disabled");
+}
+
+// Theme management via cookie
+$theme = 'dark'; // Default
+if (isset($_COOKIE['yamn_theme'])) {
+    $theme = $_COOKIE['yamn_theme'] === 'light' ? 'light' : 'dark';
+}
+
+// Handle theme switch
+if (isset($_GET['theme']) && in_array($_GET['theme'], ['light', 'dark'])) {
+    $theme = $_GET['theme'];
+    setcookie('yamn_theme', $theme, time() + (365 * 24 * 60 * 60), '/', '', true, true);
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+    exit;
+}
+
+// Security headers
+header("X-Frame-Options: DENY");
+header("X-Content-Type-Options: nosniff");
+header("Referrer-Policy: no-referrer");
+header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';");
+
+// NO CACHE headers - prevent browser from caching form with old CSRF token
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Cache-Control: post-check=0, pre-check=0", false);
+header("Pragma: no-cache");
+header("Expires: Sat, 26 Jul 1997 05:00:00 GMT"); // Date in the past
+
+// CSRF token generation - IMPROVED with refresh after use
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+// Store current token for validation BEFORE any regeneration
+$currentCsrfToken = $_SESSION['csrf_token'];
+
+/**
+ * Parse remailers from file and return array by type
+ * Entry and Exit can use ANY remailer
+ * Middle should use remailers with specific flags
+ * 
+ * @param string $type 'entry', 'middle', or 'exit'
+ * @return array Array of remailer names
+ */
+function getRemailers($type) {
+    $remailers = ['*']; // Always include Random option
+    
+    // Try multiple file locations
+    $files = [
+        '/opt/yamn-data/cache/remailers.txt',
+        '/var/www/yamnweb/remailers.txt'
+    ];
+    
+    foreach ($files as $file) {
+        if (!file_exists($file)) continue;
+        
+        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $inDataSection = false;
+        
+        foreach ($lines as $line) {
+            $line = trim($line);
+            
+            // Start parsing after separator line (--------)
+            if (preg_match('/^-{10,}/', $line)) {
+                $inDataSection = true;
+                continue;
+            }
+            
+            // Stop at Remailer-Capabilities section
+            if (stripos($line, 'Remailer-Capabilities') !== false) {
+                break;
+            }
+            
+            // Only parse lines after the separator
+            if (!$inDataSection) continue;
+            
+            // Skip empty lines
+            if (empty($line)) continue;
+            
+            // Split line: name latency uptime [flags]
+            // Example: "middleman    211112111211    :45   ++++++++++++  100.0%  D"
+            $parts = preg_split('/\s+/', $line);
+            
+            // Must have at least name + latency
+            if (count($parts) < 2) continue;
+            
+            // Extract ONLY the remailer name (first field)
+            $remailerName = $parts[0];
+            
+            // Validate name: lowercase letters, numbers, hyphens only
+            if (!preg_match('/^[a-z0-9-]+$/', $remailerName)) continue;
+            
+            // Check if last field is 'D' (middle capability flag)
+            $lastField = end($parts);
+            $isMiddleCapable = ($lastField === 'D');
+            
+            // LOGICA CORRETTA: Mutuamente esclusivi
+            if ($isMiddleCapable) {
+                // Remailers CON 'D' = SOLO middle
+                if ($type === 'middle') {
+                    $remailers[] = $remailerName;
+                }
+            } else {
+                // Remailers SENZA 'D' = SOLO entry/exit
+                if ($type === 'entry' || $type === 'exit') {
+                    $remailers[] = $remailerName;
+                }
+            }
+        }
+        break; // Use first file found
+    }
+    
+    return array_unique($remailers);
+}
+
+/**
+ * Replace asterisk (*) with random remailer from available list
+ * @param string $remailer Selected remailer (may be "*")
+ * @param array $availableRemailers List of available remailers
+ * @return string Actual remailer name
+ */
+function resolveRemailer($remailer, $availableRemailers) {
+    if ($remailer === '*') {
+        // Filter out the asterisk itself from candidates
+        $candidates = array_filter($availableRemailers, function($r) {
+            return $r !== '*';
+        });
+        
+        if (empty($candidates)) {
+            throw new Exception("No remailers available for random selection");
+        }
+        
+        // Pick random remailer
+        $randomIndex = array_rand($candidates);
+        return $candidates[$randomIndex];
+    }
+    return $remailer;
+}
+
+// Load available remailers
+$entryRemailers = getRemailers('entry');
+$middleRemailers = getRemailers('middle'); 
+$exitRemailers = getRemailers('exit');
+
+// If no remailers loaded, try to download them
+if (count($entryRemailers) <= 1 && class_exists('SecureRemailerDownloader')) {
+    try {
+        $downloader = new SecureRemailerDownloader();
+        $downloader->downloadRemailers();
+        // Reload after download
+        $entryRemailers = getRemailers('entry');
+        $middleRemailers = getRemailers('middle');
+        $exitRemailers = getRemailers('exit');
+    } catch (Exception $e) {
+        error_log("Failed to download remailers: " . $e->getMessage());
+    }
+}
+
+$message = '';
+$messageType = '';
+
+// Check for flash messages from previous redirect (PRG pattern)
+if (isset($_SESSION['flash_message'])) {
+    $message = $_SESSION['flash_message'];
+    $messageType = isset($_SESSION['flash_type']) ? $_SESSION['flash_type'] : 'info';
+    
+    // Clear flash messages after displaying
+    unset($_SESSION['flash_message']);
+    unset($_SESSION['flash_type']);
+}
+
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    // CSRF validation - IMPROVED with better error handling
+    if (!isset($_POST['csrf_token'])) {
+        $message = "Security token missing. Please reload the page and try again.";
+        $messageType = 'error';
+    } elseif ($_POST['csrf_token'] !== $currentCsrfToken) {
+        // DEBUG: Log the mismatch for troubleshooting
+        error_log("CSRF Mismatch - POST: " . substr($_POST['csrf_token'], 0, 10) . "... SESSION: " . substr($currentCsrfToken, 0, 10) . "...");
+        
+        $message = "Security token mismatch. Please try submitting again.";
+        $messageType = 'error';
+        // DO NOT regenerate token here - let user retry with same token
+    } else {
+        try {
+            // Get and sanitize form data with additional validation
+            $entryRemailer = isset($_POST['entry_remailer']) ? filter_var($_POST['entry_remailer'], FILTER_SANITIZE_STRING) : '';
+            $middleRemailer = isset($_POST['middle_remailer']) ? filter_var($_POST['middle_remailer'], FILTER_SANITIZE_STRING) : '';
+            $exitRemailer = isset($_POST['exit_remailer']) ? filter_var($_POST['exit_remailer'], FILTER_SANITIZE_STRING) : '';
+            $from = isset($_POST['from']) ? filter_var($_POST['from'], FILTER_SANITIZE_STRING) : '';
+            $replyTo = isset($_POST['reply_to']) ? filter_var($_POST['reply_to'], FILTER_SANITIZE_STRING) : '';
+            $to = isset($_POST['to']) ? filter_var($_POST['to'], FILTER_SANITIZE_EMAIL) : '';
+            $subject = isset($_POST['subject']) ? filter_var($_POST['subject'], FILTER_SANITIZE_STRING) : '';
+            $newsgroups = isset($_POST['newsgroups']) ? filter_var($_POST['newsgroups'], FILTER_SANITIZE_STRING) : '';
+            $references = isset($_POST['references']) ? filter_var($_POST['references'], FILTER_SANITIZE_STRING) : '';
+            $data = isset($_POST['data']) ? $_POST['data'] : ''; // Keep original formatting
+            $copies = isset($_POST['copies']) ? intval($_POST['copies']) : 1;
+
+            // Validate copies
+            if ($copies < 1 || $copies > 3) {
+                throw new Exception("Number of copies must be between 1 and 3.");
+            }
+
+            // Validate required fields
+            if (empty($to)) {
+                throw new Exception("Recipient (To) is required.");
+            }
+            
+            if (empty($from)) {
+                throw new Exception("Sender (From) is required.");
+            }
+
+            // Validate remailer chain
+            if (empty($entryRemailer) || empty($middleRemailer) || empty($exitRemailer)) {
+                throw new Exception("All three remailers must be specified.");
+            }
+
+            // Resolve asterisks (*) to actual random remailers
+            $resolvedEntry = resolveRemailer($entryRemailer, $entryRemailers);
+            $resolvedMiddle = resolveRemailer($middleRemailer, $middleRemailers);
+            $resolvedExit = resolveRemailer($exitRemailer, $exitRemailers);
+
+            // Build remailer chain with resolved names
+            $chain = "$resolvedEntry,$resolvedMiddle,$resolvedExit";
+            
+            // Log the resolved chain for debugging
+            error_log("Resolved remailer chain: $chain (from: $entryRemailer,$middleRemailer,$exitRemailer)");
+
+            // Build message headers
+            $headers = "Content-Type: text/plain; charset=utf-8\n";
+            $headers .= "Content-Transfer-Encoding: 8bit\n";
+            $headers .= "MIME-Version: 1.0\n";
+            
+            if (!empty($references)) {
+                $headers .= "References: $references\n";
+            }
+
+            // Build complete message
+            $messageContent = $headers . "From: $from\n";
+            
+            if (!empty($replyTo)) {
+                $messageContent .= "Reply-To: $replyTo\n";
+            }
+            
+            $messageContent .= "To: $to\nSubject: $subject\n";
+            
+            if (!empty($newsgroups)) {
+                $messageContent .= "Newsgroups: $newsgroups\n";
+            }
+            
+            $messageContent .= "\n$data";
+
+            // Verify YAMN executable exists
+            $yamnPath = '/opt/yamn-master/yamn';
+            if (!file_exists($yamnPath)) {
+                throw new Exception("YAMN executable not found at: $yamnPath");
+            }
+            
+            if (!is_executable($yamnPath)) {
+                throw new Exception("YAMN executable is not executable. Check permissions.");
+            }
+            
+            // Verify YAMN config file exists
+            $yamnConfig = '/opt/yamn-master/yamn.yml';
+            if (!file_exists($yamnConfig)) {
+                throw new Exception("YAMN config file not found at: $yamnConfig");
+            }
+
+            // Ensure temp directory exists and is writable
+            $tempDir = '/var/www/yamnweb';
+            if (!is_dir($tempDir)) {
+                throw new Exception("Temp directory does not exist: $tempDir");
+            }
+            
+            if (!is_writable($tempDir)) {
+                throw new Exception("Temp directory is not writable: $tempDir");
+            }
+            
+            // Ensure Maildir exists (required by YAMN)
+            $maildirBase = '/var/www/yamnweb/Maildir';
+            $maildirDirs = [
+                $maildirBase,
+                $maildirBase . '/tmp',
+                $maildirBase . '/new',
+                $maildirBase . '/cur'
+            ];
+            
+            foreach ($maildirDirs as $dir) {
+                if (!is_dir($dir)) {
+                    if (!@mkdir($dir, 0755, true)) {
+                        throw new Exception("Failed to create Maildir directory: $dir");
+                    }
+                    error_log("Created Maildir directory: $dir");
+                }
+            }
+
+            // Write message to temp file (use single file as in original)
+            $tempFile = $tempDir . '/message.txt';
+            $writeResult = @file_put_contents($tempFile, $messageContent);
+            
+            if ($writeResult === false) {
+                throw new Exception("Failed to write message to temporary file: $tempFile");
+            }
+
+            // Verify file was written
+            if (!file_exists($tempFile)) {
+                throw new Exception("Temp file was not created: $tempFile");
+            }
+
+            // Send multiple copies via YAMN
+            $successCount = 0;
+            $errors = [];
+
+            for ($i = 0; $i < $copies; $i++) {
+                // Build YAMN command - Use cat pipe for better exec() compatibility
+                // This avoids shell redirect issues with exec()
+                $yamnCmd = sprintf(
+                    '%s -config %s -dir %s -chain %s -read-mail',
+                    escapeshellarg($yamnPath),
+                    escapeshellarg($yamnConfig),
+                    escapeshellarg($tempDir),
+                    escapeshellarg($chain)
+                );
+                
+                // Use cat to pipe file content to YAMN
+                $cmd = sprintf(
+                    'cat %s | %s 2>&1',
+                    escapeshellarg($tempFile),
+                    $yamnCmd
+                );
+                
+                error_log("Executing YAMN command: $cmd");
+
+                // Execute YAMN
+                $output = [];
+                $returnCode = 0;
+                
+                // Check if TorExtension class exists and use it, otherwise direct exec
+                if (class_exists('TorExtension')) {
+                    try {
+                        $torWrapper = new TorExtension();
+                        $result = $torWrapper->executeWithTor($cmd, $output, $returnCode);
+                    } catch (Exception $torEx) {
+                        // Fallback to direct execution if Tor extension fails
+                        error_log("TorExtension failed: " . $torEx->getMessage() . " - falling back to direct execution");
+                        exec($cmd, $output, $returnCode);
+                    }
+                } else {
+                    // TorExtension not available, use direct execution
+                    error_log("TorExtension class not found - using direct execution");
+                    exec($cmd, $output, $returnCode);
+                }
+
+                if ($returnCode === 0) {
+                    $successCount++;
+                } else {
+                    $errorMsg = "Copy " . ($i + 1) . " failed (exit code: $returnCode)";
+                    if (!empty($output)) {
+                        $errorMsg .= ": " . implode("\n", $output);
+                    }
+                    $errors[] = $errorMsg;
+                    error_log("YAMN execution failed: " . $errorMsg);
+                }
+
+                // Random delay between copies (300-900ms)
+                if ($i < $copies - 1) {
+                    usleep(rand(300000, 900000));
+                }
+            }
+
+            // Clean up
+            @unlink($tempFile);
+
+            // Report results
+            if ($successCount === $copies) {
+                // Success - save message in session and redirect (PRG pattern)
+                $_SESSION['flash_message'] = "✓ Message sent successfully via YAMN network ($copies " . ($copies > 1 ? "copies" : "copy") . ")";
+                $_SESSION['flash_type'] = 'success';
+                
+                // Regenerate CSRF token after successful submission
+                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+                
+                // Optional: Clear any sensitive data from session
+                // unset($_SESSION['last_message_data']); // Uncomment if storing message data
+                
+                // Redirect to prevent form resubmission on page reload
+                header('Location: ' . $_SERVER['PHP_SELF']);
+                exit;
+            } elseif ($successCount > 0) {
+                $_SESSION['flash_message'] = "⚠ Partially successful: $successCount of $copies copies sent\n" . implode("\n", $errors);
+                $_SESSION['flash_type'] = 'warning';
+                
+                // Regenerate CSRF token
+                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+                
+                header('Location: ' . $_SERVER['PHP_SELF']);
+                exit;
+            } else {
+                throw new Exception("All copies failed:\n" . implode("\n", $errors));
+            }
+
+        } catch (Exception $e) {
+            $message = "✗ Error: " . $e->getMessage();
+            $messageType = 'error';
+            error_log("YAMN submission error: " . $e->getMessage() . "\nStack: " . $e->getTraceAsString());
+        } catch (Error $e) {
+            // Catch PHP 7+ Error class (for fatal errors)
+            $message = "✗ Fatal Error: " . $e->getMessage();
+            $messageType = 'error';
+            error_log("YAMN fatal error: " . $e->getMessage() . "\nStack: " . $e->getTraceAsString());
+        } catch (Throwable $e) {
+            // Catch everything else
+            $message = "✗ Unexpected error: " . $e->getMessage();
+            $messageType = 'error';
+            error_log("YAMN unexpected error: " . $e->getMessage());
+        }
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -42,10 +473,46 @@ if (empty($remailers)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="referrer" content="no-referrer">
-    <meta name="robots" content="noindex, nofollow">
-    <title>YAMN Gateway</title>
+    <title>YAMN Web Interface</title>
     <style>
+        :root {
+            --transition-speed: 0.3s;
+        }
+
+        /* Dark theme (default) */
+        body.theme-dark {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #1a1a1a;
+            --text-primary: #e0e0e0;
+            --text-secondary: #a0a0a0;
+            --accent: #00ff00;
+            --accent-hover: #00cc00;
+            --border: #333;
+            --error: #ff4444;
+            --warning: #ffaa00;
+            --success: #00ff00;
+            --tor-bg: rgba(138, 43, 226, 0.1);
+            --tor-border: #8a2be2;
+            --tor-text: #bb86fc;
+        }
+
+        /* Light theme */
+        body.theme-light {
+            --bg-primary: #f5f5f5;
+            --bg-secondary: #ffffff;
+            --text-primary: #2a2a2a;
+            --text-secondary: #666666;
+            --accent: #007700;
+            --accent-hover: #005500;
+            --border: #dddddd;
+            --error: #cc0000;
+            --warning: #ff8800;
+            --success: #008800;
+            --tor-bg: rgba(138, 43, 226, 0.05);
+            --tor-border: #6a1ba2;
+            --tor-text: #6a1ba2;
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -53,87 +520,78 @@ if (empty($remailers)) {
         }
 
         body {
-            background: #000;
-            color: #0f0;
             font-family: 'Courier New', monospace;
-            font-size: 14px;
-            line-height: 1.6;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             padding: 20px;
-            max-width: 900px;
-            margin: 0 auto;
+            line-height: 1.6;
+            transition: background var(--transition-speed), color var(--transition-speed);
         }
 
         .container {
-            border: 2px solid #0f0;
-            padding: 20px;
-            background: #000;
-        }
-
-        .header {
-            text-align: center;
-            border-bottom: 2px solid #0f0;
-            padding-bottom: 15px;
-            margin-bottom: 20px;
+            max-width: 900px;
+            margin: 0 auto;
+            background: var(--bg-secondary);
+            padding: 30px;
+            border: 2px solid var(--border);
+            border-radius: 5px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.1);
+            transition: all var(--transition-speed);
         }
 
         h1 {
-            font-size: 24px;
+            color: var(--accent);
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2em;
+            text-transform: uppercase;
             letter-spacing: 3px;
-            font-weight: bold;
-            color: #0f0;
-            text-shadow: 0 0 10px #0f0;
+            transition: color var(--transition-speed);
         }
 
         .subtitle {
-            font-size: 11px;
-            color: #0a0;
-            margin-top: 5px;
-            letter-spacing: 1px;
+            text-align: center;
+            color: var(--text-secondary);
+            margin-bottom: 30px;
+            font-size: 0.9em;
+            transition: color var(--transition-speed);
         }
 
-        .mission-brief {
-            background: #001a00;
-            border: 1px solid #0f0;
+        .info-box {
+            background: var(--tor-bg);
+            border: 1px solid var(--tor-border);
             padding: 15px;
             margin-bottom: 25px;
-            font-size: 12px;
-            line-height: 1.8;
+            border-radius: 5px;
+            font-size: 0.9em;
+            transition: all var(--transition-speed);
         }
 
-        .mission-brief p {
+        .info-box strong {
+            color: var(--tor-text);
+            display: block;
             margin-bottom: 10px;
         }
 
-        .mission-brief strong {
-            color: #0f0;
-            text-shadow: 0 0 5px #0f0;
+        .info-box ul {
+            margin-left: 20px;
+            color: var(--text-secondary);
         }
 
-        .form-section {
+        .form-group {
             margin-bottom: 20px;
-            border: 1px solid #0a0;
-            padding: 15px;
-            background: #001100;
-        }
-
-        .section-title {
-            color: #0f0;
-            font-size: 13px;
-            font-weight: bold;
-            text-transform: uppercase;
-            margin-bottom: 10px;
-            letter-spacing: 2px;
-            border-bottom: 1px solid #0a0;
-            padding-bottom: 5px;
         }
 
         label {
             display: block;
-            color: #0a0;
             margin-bottom: 5px;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
+            color: var(--accent);
+            font-weight: bold;
+            transition: color var(--transition-speed);
+        }
+
+        .required {
+            color: var(--error);
         }
 
         input[type="text"],
@@ -142,197 +600,290 @@ if (empty($remailers)) {
         select,
         textarea {
             width: 100%;
-            background: #000;
-            border: 1px solid #0f0;
-            color: #0f0;
-            padding: 8px;
+            padding: 10px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            border-radius: 3px;
             font-family: 'Courier New', monospace;
-            font-size: 13px;
-            margin-bottom: 15px;
-            transition: all 0.3s;
+            font-size: 14px;
+            transition: all var(--transition-speed);
         }
 
-        input[type="text"]:focus,
-        input[type="email"]:focus,
-        input[type="number"]:focus,
+        input:focus,
         select:focus,
         textarea:focus {
             outline: none;
-            border-color: #0f0;
-            box-shadow: 0 0 10px #0f0;
+            border-color: var(--accent);
+            box-shadow: 0 0 5px var(--accent);
         }
 
         textarea {
-            min-height: 200px;
+            min-height: 150px;
             resize: vertical;
         }
 
+        .remailer-chain {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .remailer-chain label {
+            font-size: 0.9em;
+        }
+
+        button {
+            width: 100%;
+            padding: 15px;
+            background: var(--accent);
+            color: var(--bg-primary);
+            border: none;
+            border-radius: 5px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-family: 'Courier New', monospace;
+            transition: all var(--transition-speed);
+        }
+
+        button:hover {
+            background: var(--accent-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 255, 0, 0.3);
+        }
+
+        .message {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            border-left: 4px solid;
+            transition: all var(--transition-speed);
+        }
+
+        .message.success {
+            background: rgba(0, 255, 0, 0.1);
+            border-color: var(--success);
+            color: var(--success);
+        }
+
+        .message.error {
+            background: rgba(255, 68, 68, 0.1);
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+        .message.warning {
+            background: rgba(255, 170, 0, 0.1);
+            border-color: var(--warning);
+            color: var(--warning);
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: auto;
+        }
+
+        .checkbox-group label {
+            margin: 0;
+            font-weight: normal;
+        }
+
+        /* Theme toggle button */
+        .theme-toggle {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 50px;
+            height: 50px;
+            background: var(--bg-secondary);
+            border: 2px solid var(--border);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 24px;
+            transition: all var(--transition-speed);
+            z-index: 1000;
+            text-decoration: none;
+        }
+
+        .theme-toggle:hover {
+            transform: scale(1.1) rotate(15deg);
+            border-color: var(--accent);
+            box-shadow: 0 0 20px var(--accent);
+        }
+
+        .theme-toggle-slider {
+            transition: transform var(--transition-speed);
+        }
+
+        .theme-toggle:hover .theme-toggle-slider {
+            transform: rotate(180deg);
+        }
+
+        /* Better mobile support */
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        /* Improved select dropdown */
         select {
             cursor: pointer;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2300ff00' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            padding-right: 30px;
+            appearance: none;
+            -webkit-appearance: none;
+            -moz-appearance: none;
         }
 
-        select option {
-            background: #000;
-            color: #0f0;
+        body.theme-light select {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23007700' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
         }
 
-        .inline-group {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
-            gap: 15px;
+        select:hover {
+            border-color: var(--accent);
         }
 
-        .field-note {
-            color: #0a0;
-            font-size: 11px;
-            margin-top: -10px;
-            margin-bottom: 15px;
-            font-style: italic;
-        }
-
-        .required {
-            color: #ff0;
-            text-shadow: 0 0 5px #ff0;
-        }
-
-        .submit-container {
-            text-align: center;
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 2px solid #0f0;
-        }
-
-        button[type="submit"] {
-            background: #000;
-            color: #0f0;
-            border: 2px solid #0f0;
-            padding: 12px 40px;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            font-weight: bold;
-            text-transform: uppercase;
-            letter-spacing: 3px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-
-        button[type="submit"]:hover {
-            background: #0f0;
-            color: #000;
-            box-shadow: 0 0 20px #0f0;
-        }
-
-        button[type="submit"]:active {
-            transform: scale(0.98);
-        }
-
-        .tor-status {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            background: #001a00;
-            border: 1px solid #0f0;
-            padding: 8px 12px;
-            font-size: 11px;
-            color: #0f0;
-            box-shadow: 0 0 10px #0f0;
+        select option:checked {
+            background: var(--accent);
+            color: var(--text-primary);
         }
 
         .tor-indicator {
             display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: #0f0;
-            border-radius: 50%;
-            margin-right: 5px;
-            animation: pulse 2s infinite;
+            padding: 5px 10px;
+            background: var(--tor-bg);
+            border: 1px solid var(--tor-border);
+            color: var(--tor-text);
+            border-radius: 3px;
+            font-size: 12px;
+            margin-left: 10px;
+            transition: all var(--transition-speed);
         }
 
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+        small {
+            color: var(--text-secondary);
+            transition: color var(--transition-speed);
         }
 
-        .footer {
-            margin-top: 30px;
-            padding-top: 15px;
-            border-top: 1px solid #0a0;
-            text-align: center;
-            font-size: 11px;
-            color: #0a0;
+        select option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
         }
 
         @media (max-width: 768px) {
-            .inline-group {
+            .remailer-chain {
                 grid-template-columns: 1fr;
             }
             
-            body {
-                padding: 10px;
+            .theme-toggle {
+                top: 10px;
+                right: 10px;
             }
             
-            .container {
-                padding: 15px;
+            h1 {
+                font-size: 1.5em;
+                padding-right: 70px;
             }
+        }
+
+        /* Smooth theme transition */
+        body, .container, input, select, textarea, button, .message, .info-box, .tor-indicator {
+            transition: all var(--transition-speed) ease-in-out;
         }
     </style>
 </head>
-<body>
-    <div class="tor-status">
-        <span class="tor-indicator"></span>TOR ACTIVE
-    </div>
-
+<body class="theme-<?php echo htmlspecialchars($theme); ?>">
     <div class="container">
-        <div class="header">
-            <h1>[ YAMN GATEWAY ]</h1>
-            <div class="subtitle">YET ANOTHER MIX NETWORK - SECURE ANONYMOUS EMAIL SYSTEM</div>
+        <!-- Theme Toggle -->
+        <a href="?theme=<?php echo $theme === 'dark' ? 'light' : 'dark'; ?>" class="theme-toggle" title="Switch to <?php echo $theme === 'dark' ? 'Light' : 'Dark'; ?> Mode">
+            <div class="theme-toggle-slider">
+                <?php echo $theme === 'dark' ? '🌙' : '☀️'; ?>
+            </div>
+        </a>
+
+        <h1>⚡ YAMN WEB INTERFACE ⚡</h1>
+        <div class="subtitle">Tor before Yamn Remailer Network</div>
+        
+        <!-- DEBUG: Session check (can be removed after troubleshooting) -->
+        <?php if (isset($_GET['debug'])): ?>
+            <div class="info-box" style="font-size: 11px; font-family: monospace;">
+                <strong>DEBUG INFO:</strong>
+                Session ID: <?php echo substr(session_id(), 0, 16); ?>...<br>
+                CSRF Token: <?php echo substr($_SESSION['csrf_token'], 0, 16); ?>...<br>
+                PHP Version: <?php echo PHP_VERSION; ?><br>
+                Session Save Path: <?php echo session_save_path(); ?><br>
+                Cookie Params: <?php echo json_encode(session_get_cookie_params()); ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if (!empty($message)): ?>
+            <div class="message <?php echo $messageType; ?>">
+                <?php echo htmlspecialchars($message); ?>
+            </div>
+        <?php endif; ?>
+
+        <div class="info-box">
+            <strong>Security Features Active:</strong>
+            <ul>
+               <li>Tor/Onion network before Yamn Mix Network</li>
+                <li>Onion Smtp Relay with traffic padding and timing randomization</li>
+                <li>Forward secrecy and metadata protection</li>
+                <li>No persistent message retention - No logs website</li>
+            </ul>
         </div>
 
-        <div class="mission-brief">
-            <p><strong>MISSION:</strong> This interface provides access to the YAMN anonymous remailer network for secure, untraceable email transmission. Messages are encrypted and routed through a chain of randomly selected mix nodes, making traffic analysis and sender identification computationally infeasible.</p>
-            
-            <p><strong>OPERATION:</strong> All traffic is mandatorily routed through Tor before reaching the YAMN network. The YAMN entry node receives connections only from Tor exit nodes, never learning the true origin IP address. Messages are padded to standard sizes, delayed with random intervals, and protected against replay attacks through cryptographic message-ID verification.</p>
-            
-            <p><strong>SECURITY:</strong> Double-layer anonymization: Tor conceals your identity from the YAMN network, while YAMN's multi-hop mixing (minimum 3 remailers) prevents the final recipient from tracing back to the entry point. No persistent metadata retained.</p>
-            
-            <p><strong>STATUS:</strong> System operational. Tor connection verified. No logs retained.</p>
-        </div>
+        <form method="POST" action="" id="yamnForm">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
 
-        <form action="send_email_with_tor.php" method="POST">
-            <!-- REMAILER CHAIN CONFIGURATION -->
-            <div class="form-section">
-                <div class="section-title">[ Chain Configuration ]</div>
-                
-                <div class="inline-group">
+            <div class="form-group">
+                <label>Remailer Chain <span class="required">*</span></label>
+                <div class="remailer-chain">
                     <div>
-                        <label for="entry_remailer">Entry Node <span class="required">*</span></label>
+                        <label for="entry_remailer">Entry Node</label>
                         <select name="entry_remailer" id="entry_remailer" required>
-                            <option value="*" selected>* (Random)</option>
-                            <?php foreach ($remailers as $remailer): ?>
+                            <option value="">-- Select Entry --</option>
+                            <?php foreach ($entryRemailers as $remailer): ?>
                                 <option value="<?php echo htmlspecialchars($remailer); ?>">
                                     <?php echo htmlspecialchars($remailer); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </div>
-                    
                     <div>
-                        <label for="middle_remailer">Middle Node <span class="required">*</span></label>
+                        <label for="middle_remailer">Middle Node</label>
                         <select name="middle_remailer" id="middle_remailer" required>
-                            <option value="*" selected>* (Random)</option>
-                            <?php foreach ($remailers as $remailer): ?>
+                            <option value="">-- Select Middle --</option>
+                            <?php foreach ($middleRemailers as $remailer): ?>
                                 <option value="<?php echo htmlspecialchars($remailer); ?>">
                                     <?php echo htmlspecialchars($remailer); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </div>
-                    
                     <div>
-                        <label for="exit_remailer">Exit Node <span class="required">*</span></label>
+                        <label for="exit_remailer">Exit Node</label>
                         <select name="exit_remailer" id="exit_remailer" required>
-                            <option value="*" selected>* (Random)</option>
-                            <?php foreach ($remailers as $remailer): ?>
+                            <option value="">-- Select Exit --</option>
+                            <?php foreach ($exitRemailers as $remailer): ?>
                                 <option value="<?php echo htmlspecialchars($remailer); ?>">
                                     <?php echo htmlspecialchars($remailer); ?>
                                 </option>
@@ -340,65 +891,100 @@ if (empty($remailers)) {
                         </select>
                     </div>
                 </div>
-                <div class="field-note">* = Random selection (recommended for maximum security)</div>
             </div>
 
-            <!-- MESSAGE HEADERS -->
-            <div class="form-section">
-                <div class="section-title">[ Message Headers ]</div>
-                
-                <label for="from">From <span class="required">*</span></label>
-                <input type="email" name="from" id="from" placeholder="anonymous@anonymous.invalid" required>
-                
-                <label for="reply_to">Reply-To (Optional)</label>
-                <input type="email" name="reply_to" id="reply_to" placeholder="reply@example.com">
-                
-                <label for="to">To <span class="required">*</span></label>
-                <input type="email" name="to" id="to" placeholder="recipient@example.com" required>
-                
-                <label for="subject">Subject <span class="required">*</span></label>
-                <input type="text" name="subject" id="subject" placeholder="Message subject" required>
-                
-                <label for="newsgroups">Newsgroups (Optional)</label>
+            <div class="form-group">
+                <label for="from">From Address <span class="required">*</span></label>
+                <input type="text" name="from" id="from" placeholder="Anonymous <anonymous@anonymous.com>" required>
+            </div>
+
+            <div class="form-group">
+                <label for="reply_to">Reply-To Address</label>
+                <input type="text" name="reply_to" id="reply_to" placeholder="No Reply <noreply@anonymous.com>">
+            </div>
+
+            <div class="form-group">
+                <label for="to">To Address <span class="required">*</span></label>
+                <input type="email" name="to" id="to" placeholder="recipient@example.com or user@example.onion" required>
+            </div>
+
+            <div class="form-group">
+                <label for="subject">Subject</label>
+                <input type="text" name="subject" id="subject" placeholder="Message subject">
+            </div>
+
+            <div class="form-group">
+                <label for="newsgroups">Newsgroups (optional)</label>
                 <input type="text" name="newsgroups" id="newsgroups" placeholder="alt.anonymous.messages">
-                <div class="field-note">For Usenet posting (leave blank for email only)</div>
-                
-                <label for="references">References (Optional)</label>
+            </div>
+
+            <div class="form-group">
+                <label for="references">References (optional)</label>
                 <input type="text" name="references" id="references" placeholder="Message-ID for threading">
-                <div class="field-note">For reply threading</div>
             </div>
 
-            <!-- MESSAGE BODY -->
-            <div class="form-section">
-                <div class="section-title">[ Message Body ]</div>
-                
-                <label for="data">Content <span class="required">*</span></label>
-                <textarea name="data" id="data" placeholder="Enter your message here..." required></textarea>
+            <div class="form-group">
+                <label for="data">Message Body <span class="required">*</span></label>
+                <textarea name="data" id="data" placeholder="Your anonymous message..." required></textarea>
             </div>
 
-            <!-- TRANSMISSION OPTIONS -->
-            <div class="form-section">
-                <div class="section-title">[ Transmission Options ]</div>
-                
-                <label for="copies">Number of Copies <span class="required">*</span></label>
-                <select name="copies" id="copies" required>
-                    <option value="1">1 Copy (Faster)</option>
-                    <option value="2" selected>2 Copies (Balanced - Recommended)</option>
-                    <option value="3">3 Copies (Maximum Reliability)</option>
-                </select>
-                <div class="field-note">Multiple copies share same exit node to prevent duplicates</div>
+            <div class="form-group">
+                <label for="copies">Number of Copies (1-3)</label>
+                <input type="number" name="copies" id="copies" value="1" min="1" max="3" required>
+                <small>Multiple copies increase reliability through redundancy</small>
             </div>
 
-            <!-- SUBMIT -->
-            <div class="submit-container">
-                <button type="submit">[ TRANSMIT MESSAGE ]</button>
+            <div class="form-group">
+                <div class="checkbox-group">
             </div>
+
+            <button type="submit">🚀 SEND </button>
         </form>
-
-        <div class="footer">
-            YAMN GATEWAY v2.0 | ALL TRAFFIC ROUTED VIA TOR | NO LOGS RETAINED<br>
-            OPERATIONAL SECURITY: ENABLED | METADATA PROTECTION: ACTIVE
-        </div>
     </div>
+
+    <script>
+        // Reset form after successful submission
+        <?php if ($messageType === 'success'): ?>
+        // Clear form on success
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('yamnForm').reset();
+        });
+        <?php endif; ?>
+
+        // Auto-enable Tor checkbox for .onion addresses
+        document.getElementById('to').addEventListener('input', function() {
+            const torCheckbox = document.getElementById('use_tor');
+            if (this.value.includes('.onion')) {
+                torCheckbox.checked = true;
+            }
+        });
+
+        // Prevent selecting same remailer multiple times
+        document.querySelectorAll('.remailer-chain select').forEach(select => {
+            select.addEventListener('change', function() {
+                const selects = document.querySelectorAll('.remailer-chain select');
+                const values = Array.from(selects).map(s => s.value).filter(v => v);
+                
+                selects.forEach(s => {
+                    Array.from(s.options).forEach(option => {
+                        if (option.value && values.includes(option.value) && option.value !== '*' && s !== select) {
+                            option.style.color = '#666';
+                        } else {
+                            option.style.color = 'var(--text-primary)';
+                        }
+                    });
+                });
+            });
+        });
+
+        // Smooth scroll to top after theme change
+        if (window.location.search.includes('theme=')) {
+            window.scrollTo({top: 0, behavior: 'smooth'});
+            // Clean URL without reloading
+            const url = new URL(window.location);
+            url.searchParams.delete('theme');
+            window.history.replaceState({}, '', url);
+        }
+    </script>
 </body>
 </html>

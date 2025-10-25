@@ -1,4 +1,4 @@
-# YAMN Web Interface - Mix Network Email Gateway
+# Tor before Yamn Anonymous Remailers Network Gateway
 
 ![Status](https://img.shields.io/badge/status-operational-green)
 ![Security](https://img.shields.io/badge/security-hardened-red)

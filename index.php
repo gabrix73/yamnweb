@@ -358,98 +358,38 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 throw new Exception("Temp file was not created: $tempFile");
             }
 
-            // Send multiple copies via YAMN
-            $successCount = 0;
-            $errors = [];
+            // Log to debug.log
+            $debugLog = '/var/www/yamnweb/debug.log';
+            file_put_contents($debugLog, date('Y-m-d H:i:s') . " - Starting email send\n", FILE_APPEND);
+            file_put_contents($debugLog, "To: $to | Chain: $chain | Copies: $copies\n", FILE_APPEND);
 
-            for ($i = 0; $i < $copies; $i++) {
-                // Build YAMN command - Use cat pipe for better exec() compatibility
-                // This avoids shell redirect issues with exec()
-                $yamnCmd = sprintf(
-                    '%s -config %s -dir %s -chain %s -read-mail',
-                    escapeshellarg($yamnPath),
-                    escapeshellarg($yamnConfig),
-                    escapeshellarg($tempDir),
-                    escapeshellarg($chain)
-                );
+            // Use sendYamnEmail() from tor_extension.php
+            if (function_exists('sendYamnEmail')) {
+                $result = sendYamnEmail($chain, $copies, $tempFile, true);
                 
-                // Use cat to pipe file content to YAMN
-                $cmd = sprintf(
-                    'cat %s | %s 2>&1',
-                    escapeshellarg($tempFile),
-                    $yamnCmd
-                );
+                // Log result
+                file_put_contents($debugLog, date('Y-m-d H:i:s') . " - Result: " . ($result['success'] ? 'SUCCESS' : 'FAILED') . "\n", FILE_APPEND);
                 
-                error_log("Executing YAMN command: $cmd");
-
-                // Execute YAMN
-                $output = [];
-                $returnCode = 0;
+                // Clean up
+                @unlink($tempFile);
                 
-                // Check if TorExtension class exists and use it, otherwise direct exec
-                if (class_exists('TorExtension')) {
-                    try {
-                        $torWrapper = new TorExtension();
-                        $result = $torWrapper->executeWithTor($cmd, $output, $returnCode);
-                    } catch (Exception $torEx) {
-                        // Fallback to direct execution if Tor extension fails
-                        error_log("TorExtension failed: " . $torEx->getMessage() . " - falling back to direct execution");
-                        exec($cmd, $output, $returnCode);
-                    }
+                if ($result['success']) {
+                    // Success - save message in session and redirect (PRG pattern)
+                    $_SESSION['flash_message'] = "✓ Message sent successfully via YAMN network ($copies " . ($copies > 1 ? "copies" : "copy") . ")";
+                    $_SESSION['flash_type'] = 'success';
+                    
+                    // Regenerate CSRF token after successful submission
+                    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+                    
+                    // Redirect to prevent form resubmission on page reload
+                    header('Location: ' . $_SERVER['PHP_SELF']);
+                    exit;
                 } else {
-                    // TorExtension not available, use direct execution
-                    error_log("TorExtension class not found - using direct execution");
-                    exec($cmd, $output, $returnCode);
+                    throw new Exception("YAMN send failed. Check debug.log for details.");
                 }
-
-                if ($returnCode === 0) {
-                    $successCount++;
-                } else {
-                    $errorMsg = "Copy " . ($i + 1) . " failed (exit code: $returnCode)";
-                    if (!empty($output)) {
-                        $errorMsg .= ": " . implode("\n", $output);
-                    }
-                    $errors[] = $errorMsg;
-                    error_log("YAMN execution failed: " . $errorMsg);
-                }
-
-                // Random delay between copies (300-900ms)
-                if ($i < $copies - 1) {
-                    usleep(rand(300000, 900000));
-                }
-            }
-
-            // Clean up
-            @unlink($tempFile);
-
-            // Report results
-            if ($successCount === $copies) {
-                // Success - save message in session and redirect (PRG pattern)
-                $_SESSION['flash_message'] = "✓ Message sent successfully via YAMN network ($copies " . ($copies > 1 ? "copies" : "copy") . ")";
-                $_SESSION['flash_type'] = 'success';
-                
-                // Regenerate CSRF token after successful submission
-                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-                
-                // Optional: Clear any sensitive data from session
-                // unset($_SESSION['last_message_data']); // Uncomment if storing message data
-                
-                // Redirect to prevent form resubmission on page reload
-                header('Location: ' . $_SERVER['PHP_SELF']);
-                exit;
-            } elseif ($successCount > 0) {
-                $_SESSION['flash_message'] = "⚠ Partially successful: $successCount of $copies copies sent\n" . implode("\n", $errors);
-                $_SESSION['flash_type'] = 'warning';
-                
-                // Regenerate CSRF token
-                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-                
-                header('Location: ' . $_SERVER['PHP_SELF']);
-                exit;
             } else {
-                throw new Exception("All copies failed:\n" . implode("\n", $errors));
+                throw new Exception("sendYamnEmail() function not found. Check tor_extension.php");
             }
-
         } catch (Exception $e) {
             $message = "✗ Error: " . $e->getMessage();
             $messageType = 'error';

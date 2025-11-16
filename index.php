@@ -88,62 +88,62 @@ $currentCsrfToken = $_SESSION['csrf_token'];
  * Parse remailers from file and return array by type
  * Entry and Exit can use ANY remailer
  * Middle should use remailers with specific flags
- * 
+ *
  * @param string $type 'entry', 'middle', or 'exit'
  * @return array Array of remailer names
  */
 function getRemailers($type) {
     $remailers = ['*']; // Always include Random option
-    
+
     // Try multiple file locations
     $files = [
         '/opt/yamn-data/cache/remailers.txt',
         '/var/www/yamnweb/remailers.txt'
     ];
-    
+
     foreach ($files as $file) {
         if (!file_exists($file)) continue;
-        
+
         $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         $inDataSection = false;
-        
+
         foreach ($lines as $line) {
             $line = trim($line);
-            
+
             // Start parsing after separator line (--------)
             if (preg_match('/^-{10,}/', $line)) {
                 $inDataSection = true;
                 continue;
             }
-            
+
             // Stop at Remailer-Capabilities section
             if (stripos($line, 'Remailer-Capabilities') !== false) {
                 break;
             }
-            
+
             // Only parse lines after the separator
             if (!$inDataSection) continue;
-            
+
             // Skip empty lines
             if (empty($line)) continue;
-            
+
             // Split line: name latency uptime [flags]
             // Example: "middleman    211112111211    :45   ++++++++++++  100.0%  D"
             $parts = preg_split('/\s+/', $line);
-            
+
             // Must have at least name + latency
             if (count($parts) < 2) continue;
-            
+
             // Extract ONLY the remailer name (first field)
             $remailerName = $parts[0];
-            
+
             // Validate name: lowercase letters, numbers, hyphens only
             if (!preg_match('/^[a-z0-9-]+$/', $remailerName)) continue;
-            
+
             // Check if last field is 'D' (middle capability flag)
             $lastField = end($parts);
             $isMiddleCapable = ($lastField === 'D');
-            
+
             // LOGICA CORRETTA: Mutuamente esclusivi
             if ($isMiddleCapable) {
                 // Remailers CON 'D' = SOLO middle
@@ -159,7 +159,7 @@ function getRemailers($type) {
         }
         break; // Use first file found
     }
-    
+
     return array_unique($remailers);
 }
 
@@ -175,11 +175,11 @@ function resolveRemailer($remailer, $availableRemailers) {
         $candidates = array_filter($availableRemailers, function($r) {
             return $r !== '*';
         });
-        
+
         if (empty($candidates)) {
             throw new Exception("No remailers available for random selection");
         }
-        
+
         // Pick random remailer
         $randomIndex = array_rand($candidates);
         return $candidates[$randomIndex];
@@ -189,7 +189,7 @@ function resolveRemailer($remailer, $availableRemailers) {
 
 // Load available remailers
 $entryRemailers = getRemailers('entry');
-$middleRemailers = getRemailers('middle'); 
+$middleRemailers = getRemailers('middle');
 $exitRemailers = getRemailers('exit');
 
 // If no remailers loaded, try to download them
@@ -213,7 +213,7 @@ $messageType = '';
 if (isset($_SESSION['flash_message'])) {
     $message = $_SESSION['flash_message'];
     $messageType = isset($_SESSION['flash_type']) ? $_SESSION['flash_type'] : 'info';
-    
+
     // Clear flash messages after displaying
     unset($_SESSION['flash_message']);
     unset($_SESSION['flash_type']);
@@ -223,15 +223,20 @@ if (isset($_SESSION['flash_message'])) {
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     // CSRF validation - IMPROVED with better error handling
     if (!isset($_POST['csrf_token'])) {
-        $message = "Security token missing. Please reload the page and try again.";
-        $messageType = 'error';
+        // Save error in session and redirect
+        $_SESSION['flash_message'] = "Security token missing. Please reload the page and try again.";
+        $_SESSION['flash_type'] = 'error';
+        header('Location: ' . $_SERVER['PHP_SELF']);
+        exit;
     } elseif ($_POST['csrf_token'] !== $currentCsrfToken) {
         // DEBUG: Log the mismatch for troubleshooting
         error_log("CSRF Mismatch - POST: " . substr($_POST['csrf_token'], 0, 10) . "... SESSION: " . substr($currentCsrfToken, 0, 10) . "...");
-        
-        $message = "Security token mismatch. Please try submitting again.";
-        $messageType = 'error';
-        // DO NOT regenerate token here - let user retry with same token
+
+        // Save error in session and redirect
+        $_SESSION['flash_message'] = "Security token mismatch. Please try submitting again.";
+        $_SESSION['flash_type'] = 'error';
+        header('Location: ' . $_SERVER['PHP_SELF']);
+        exit;
     } else {
         try {
             // Get and sanitize form data with additional validation
@@ -256,7 +261,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             if (empty($to)) {
                 throw new Exception("Recipient (To) is required.");
             }
-            
+
             if (empty($from)) {
                 throw new Exception("Sender (From) is required.");
             }
@@ -273,7 +278,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
             // Build remailer chain with resolved names
             $chain = "$resolvedEntry,$resolvedMiddle,$resolvedExit";
-            
+
             // Log the resolved chain for debugging
             error_log("Resolved remailer chain: $chain (from: $entryRemailer,$middleRemailer,$exitRemailer)");
 
@@ -281,24 +286,24 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             $headers = "Content-Type: text/plain; charset=utf-8\n";
             $headers .= "Content-Transfer-Encoding: 8bit\n";
             $headers .= "MIME-Version: 1.0\n";
-            
+
             if (!empty($references)) {
                 $headers .= "References: $references\n";
             }
 
             // Build complete message
             $messageContent = $headers . "From: $from\n";
-            
+
             if (!empty($replyTo)) {
                 $messageContent .= "Reply-To: $replyTo\n";
             }
-            
+
             $messageContent .= "To: $to\nSubject: $subject\n";
-            
+
             if (!empty($newsgroups)) {
                 $messageContent .= "Newsgroups: $newsgroups\n";
             }
-            
+
             $messageContent .= "\n$data";
 
             // Verify YAMN executable exists
@@ -306,11 +311,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             if (!file_exists($yamnPath)) {
                 throw new Exception("YAMN executable not found at: $yamnPath");
             }
-            
+
             if (!is_executable($yamnPath)) {
                 throw new Exception("YAMN executable is not executable. Check permissions.");
             }
-            
+
             // Verify YAMN config file exists
             $yamnConfig = '/opt/yamn-master/yamn.yml';
             if (!file_exists($yamnConfig)) {
@@ -322,11 +327,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             if (!is_dir($tempDir)) {
                 throw new Exception("Temp directory does not exist: $tempDir");
             }
-            
+
             if (!is_writable($tempDir)) {
                 throw new Exception("Temp directory is not writable: $tempDir");
             }
-            
+
             // Ensure Maildir exists (required by YAMN)
             $maildirBase = '/var/www/yamnweb/Maildir';
             $maildirDirs = [
@@ -335,7 +340,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 $maildirBase . '/new',
                 $maildirBase . '/cur'
             ];
-            
+
             foreach ($maildirDirs as $dir) {
                 if (!is_dir($dir)) {
                     if (!@mkdir($dir, 0755, true)) {
@@ -348,7 +353,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             // Write message to temp file (use single file as in original)
             $tempFile = $tempDir . '/message.txt';
             $writeResult = @file_put_contents($tempFile, $messageContent);
-            
+
             if ($writeResult === false) {
                 throw new Exception("Failed to write message to temporary file: $tempFile");
             }
@@ -366,21 +371,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             // Use sendYamnEmail() from tor_extension.php
             if (function_exists('sendYamnEmail')) {
                 $result = sendYamnEmail($chain, $copies, $tempFile, true);
-                
+
                 // Log result
                 file_put_contents($debugLog, date('Y-m-d H:i:s') . " - Result: " . ($result['success'] ? 'SUCCESS' : 'FAILED') . "\n", FILE_APPEND);
-                
+
                 // Clean up
                 @unlink($tempFile);
-                
+
                 if ($result['success']) {
                     // Success - save message in session and redirect (PRG pattern)
                     $_SESSION['flash_message'] = "✓ Message sent successfully via YAMN network ($copies " . ($copies > 1 ? "copies" : "copy") . ")";
                     $_SESSION['flash_type'] = 'success';
-                    
+
                     // Regenerate CSRF token after successful submission
                     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-                    
+
                     // Redirect to prevent form resubmission on page reload
                     header('Location: ' . $_SERVER['PHP_SELF']);
                     exit;
@@ -391,19 +396,32 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 throw new Exception("sendYamnEmail() function not found. Check tor_extension.php");
             }
         } catch (Exception $e) {
-            $message = "✗ Error: " . $e->getMessage();
-            $messageType = 'error';
+            // Save error in session and redirect (PRG pattern for errors too)
+            $_SESSION['flash_message'] = "✗ Error: " . $e->getMessage();
+            $_SESSION['flash_type'] = 'error';
             error_log("YAMN submission error: " . $e->getMessage() . "\nStack: " . $e->getTraceAsString());
+
+            // Redirect to prevent form resubmission
+            header('Location: ' . $_SERVER['PHP_SELF']);
+            exit;
         } catch (Error $e) {
             // Catch PHP 7+ Error class (for fatal errors)
-            $message = "✗ Fatal Error: " . $e->getMessage();
-            $messageType = 'error';
+            $_SESSION['flash_message'] = "✗ Fatal Error: " . $e->getMessage();
+            $_SESSION['flash_type'] = 'error';
             error_log("YAMN fatal error: " . $e->getMessage() . "\nStack: " . $e->getTraceAsString());
+
+            // Redirect to prevent form resubmission
+            header('Location: ' . $_SERVER['PHP_SELF']);
+            exit;
         } catch (Throwable $e) {
             // Catch everything else
-            $message = "✗ Unexpected error: " . $e->getMessage();
-            $messageType = 'error';
+            $_SESSION['flash_message'] = "✗ Unexpected error: " . $e->getMessage();
+            $_SESSION['flash_type'] = 'error';
             error_log("YAMN unexpected error: " . $e->getMessage());
+
+            // Redirect to prevent form resubmission
+            header('Location: ' . $_SERVER['PHP_SELF']);
+            exit;
         }
     }
 }
@@ -733,12 +751,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             .remailer-chain {
                 grid-template-columns: 1fr;
             }
-            
+
             .theme-toggle {
                 top: 10px;
                 right: 10px;
             }
-            
+
             h1 {
                 font-size: 1.5em;
                 padding-right: 70px;
@@ -762,7 +780,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
         <h1>⚡ YAMN WEB INTERFACE ⚡</h1>
         <div class="subtitle">Tor before Yamn Remailer Network</div>
-        
+
         <!-- DEBUG: Session check (can be removed after troubleshooting) -->
         <?php if (isset($_GET['debug'])): ?>
             <div class="info-box" style="font-size: 11px; font-family: monospace;">
@@ -883,14 +901,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     </div>
 
     <script>
-        // Reset form after successful submission
-        <?php if ($messageType === 'success'): ?>
-        // Clear form on success
-        document.addEventListener('DOMContentLoaded', function() {
-            document.getElementById('yamnForm').reset();
-        });
-        <?php endif; ?>
-
         // Auto-enable Tor checkbox for .onion addresses
         document.getElementById('to').addEventListener('input', function() {
             const torCheckbox = document.getElementById('use_tor');
@@ -904,7 +914,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             select.addEventListener('change', function() {
                 const selects = document.querySelectorAll('.remailer-chain select');
                 const values = Array.from(selects).map(s => s.value).filter(v => v);
-                
+
                 selects.forEach(s => {
                     Array.from(s.options).forEach(option => {
                         if (option.value && values.includes(option.value) && option.value !== '*' && s !== select) {
